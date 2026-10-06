@@ -1,10 +1,11 @@
-// FlixGo — Flutter UI (no external packages).
+// FlixGo — Flutter UI with real downloads.
 // Usage: flutter create flixgo, then replace lib/main.dart with this file.
-// Optional: add the Tajawal font (pubspec.yaml or google_fonts) for the same look.
-import 'dart:async';
-import 'dart:math';
+// Add path_provider to pubspec.yaml; see README.md.
+import 'dart:convert';
+import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:path_provider/path_provider.dart';
 
 void main() => runApp(const FlixGoApp());
 
@@ -69,6 +70,8 @@ const tr = {
     'mb': ' ميغابايت', 'ok': 'تم ✓',
     'empty': 'لا توجد تحميلات بعد.\nالصق رابطاً وابدأ.',
     'l0': 'ملفاتك تظهر هنا.',
+    'failed': 'فشل التحميل: ',
+    'saved': 'تم الحفظ في ملفات التطبيق',
   },
   'en': {
     'h1': 'Download what you love\nin one tap',
@@ -83,6 +86,8 @@ const tr = {
     'mb': ' MB', 'ok': 'Done ✓',
     'empty': 'No downloads yet.\nPaste a link to start.',
     'l0': 'Your files show up here.',
+    'failed': 'Download failed: ',
+    'saved': 'Saved in app files',
   },
 };
 
@@ -91,7 +96,97 @@ class Item {
   final bool audio;
   final String q;
   double pr = 0;
+  bool downloading = true;
+  String? filePath;
+  String? error;
   Item(this.p, this.audio, this.q);
+}
+
+/// Connects the UI to a real download/resolver server.
+///
+/// The server receives a social-media URL and returns a direct media URL.
+/// Configure it with:
+/// flutter run --dart-define=FLIXGO_API_BASE_URL=https://your-api.example.com
+class DownloadService {
+  static const apiBaseUrl = String.fromEnvironment(
+    'FLIXGO_API_BASE_URL',
+    defaultValue: 'http://10.0.2.2:8787',
+  );
+
+  static Future<String> download({
+    required String sourceUrl,
+    required String quality,
+    required bool audio,
+    required void Function(double progress) onProgress,
+  }) async {
+    final api = Uri.parse('$apiBaseUrl/api/download');
+    final client = HttpClient();
+    try {
+      final request = await client.postUrl(api);
+      request.headers.contentType = ContentType.json;
+      request.write(jsonEncode({
+        'url': sourceUrl,
+        'quality': quality,
+        'audioOnly': audio,
+      }));
+      final response = await request.close();
+      final body = await utf8.decoder.bind(response).join();
+      if (response.statusCode < 200 || response.statusCode >= 300) {
+        throw Exception(_serverMessage(body, response.statusCode));
+      }
+
+      final payload = jsonDecode(body) as Map<String, dynamic>;
+      final directUrl = payload['downloadUrl'] as String?;
+      if (directUrl == null || directUrl.isEmpty) {
+        throw Exception('The server did not return downloadUrl');
+      }
+
+      final fileName = _safeName(
+        (payload['fileName'] as String?) ??
+            'flixgo_${DateTime.now().millisecondsSinceEpoch}.${audio ? 'mp3' : 'mp4'}',
+      );
+      final directory = await getApplicationDocumentsDirectory();
+      final downloads = Directory('${directory.path}/FlixGo/Downloads');
+      await downloads.create(recursive: true);
+      final file = File('${downloads.path}/$fileName');
+
+      final mediaRequest = await client.getUrl(Uri.parse(directUrl));
+      final mediaResponse = await mediaRequest.close();
+      if (mediaResponse.statusCode < 200 || mediaResponse.statusCode >= 300) {
+        throw Exception('Media server returned ${mediaResponse.statusCode}');
+      }
+      final total = mediaResponse.contentLength;
+      var received = 0;
+      final sink = file.openWrite();
+      try {
+        await for (final chunk in mediaResponse) {
+          sink.add(chunk);
+          received += chunk.length;
+          if (total > 0) onProgress(received / total * 100);
+        }
+      } finally {
+        await sink.close();
+      }
+      onProgress(100);
+      return file.path;
+    } finally {
+      client.close(force: true);
+    }
+  }
+
+  static String _serverMessage(String body, int status) {
+    try {
+      final json = jsonDecode(body) as Map<String, dynamic>;
+      return (json['error'] ?? json['message'] ?? 'HTTP $status').toString();
+    } catch (_) {
+      return 'HTTP $status';
+    }
+  }
+
+  static String _safeName(String value) {
+    final cleaned = value.replaceAll(RegExp(r'[\\/:*?"<>|\x00-\x1F]'), '_');
+    return cleaned.trim().isEmpty ? 'flixgo_download.bin' : cleaned.trim();
+  }
 }
 
 class FlixGoApp extends StatelessWidget {
@@ -158,7 +253,7 @@ class _HomeState extends State<Home> {
     setState(() {});
   }
 
-  void start() {
+  Future<void> start() async {
     final p = plat;
     if (p == null) {
       setState(() => err = true);
@@ -168,25 +263,41 @@ class _HomeState extends State<Home> {
       toast(t('need'));
       return;
     }
+
+    final sourceUrl = url.text.trim();
     final qq = audio ? qa[aq] : qv[vq];
     final it = Item(p, audio, audio ? '${qq[0]} kbps' : qq[0]);
     setState(() {
       items.insert(0, it);
       url.clear();
+      tab = 1;
     });
     toast(t('started'));
-    // Simulated progress. Replace with your real download service.
-    Timer.periodic(const Duration(milliseconds: 350), (tm) {
-      if (!mounted) {
-        tm.cancel();
-        return;
-      }
-      setState(() => it.pr = min(100, it.pr + Random().nextDouble() * 14 + 4));
-      if (it.pr >= 100) {
-        tm.cancel();
-        toast('${t('done')}${title(it)}');
-      }
-    });
+
+    try {
+      final path = await DownloadService.download(
+        sourceUrl: sourceUrl,
+        quality: it.q,
+        audio: audio,
+        onProgress: (value) {
+          if (mounted) setState(() => it.pr = value.clamp(0, 100).toDouble());
+        },
+      );
+      if (!mounted) return;
+      setState(() {
+        it.pr = 100;
+        it.downloading = false;
+        it.filePath = path;
+      });
+      toast('${t('done')}${title(it)}');
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        it.downloading = false;
+        it.error = e.toString().replaceFirst('Exception: ', '');
+      });
+      toast('${t('failed')}${it.error}');
+    }
   }
 
   Widget sq(Widget ch, VoidCallback f) => GestureDetector(
@@ -415,14 +526,15 @@ class _HomeState extends State<Home> {
   }
 
   Widget card(Item i) {
-    final done = i.pr >= 100;
+    final done = i.filePath != null;
+    final failed = i.error != null;
     return Container(
       margin: const EdgeInsets.only(top: 12),
       padding: const EdgeInsets.all(12),
       decoration: BoxDecoration(
           color: c.card,
           borderRadius: BorderRadius.circular(20),
-          border: Border.all(color: c.line, width: 1.5)),
+          border: Border.all(color: failed ? c.pink : c.line, width: 1.5)),
       child: Row(children: [
         Container(
           width: 54,
@@ -445,25 +557,31 @@ class _HomeState extends State<Home> {
             Text('${t(i.audio ? 'aK' : 'vK')} · ${i.q} · ${size(i)}',
                 style: TextStyle(color: c.mute, fontSize: 12.5)),
             const SizedBox(height: 8),
-            ClipRRect(
-              borderRadius: BorderRadius.circular(9),
-              child: LinearProgressIndicator(
-                  value: i.pr / 100,
-                  minHeight: 7,
-                  backgroundColor: c.bg2,
-                  color: c.aqua),
-            ),
+            if (failed)
+              Text(i.error!,
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(color: c.pink, fontSize: 11.5))
+            else
+              ClipRRect(
+                borderRadius: BorderRadius.circular(9),
+                child: LinearProgressIndicator(
+                    value: i.pr / 100,
+                    minHeight: 7,
+                    backgroundColor: c.bg2,
+                    color: c.aqua),
+              ),
           ]),
         ),
         const SizedBox(width: 12),
         SizedBox(
           width: 40,
-          child: Text(done ? t('ok') : '${i.pr.floor()}%',
+          child: Text(failed ? '!' : done ? t('ok') : '${i.pr.floor()}%',
               textAlign: TextAlign.center,
               style: TextStyle(
-                  color: done ? c.aqua : c.ink,
+                  color: failed ? c.pink : done ? c.aqua : c.ink,
                   fontSize: 13,
-                  fontWeight: done ? FontWeight.w700 : FontWeight.w400)),
+                  fontWeight: done || failed ? FontWeight.w700 : FontWeight.w400)),
         ),
       ]),
     );
