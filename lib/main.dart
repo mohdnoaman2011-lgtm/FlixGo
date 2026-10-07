@@ -24,25 +24,46 @@ const lightPal = Pal(Color(0xFFF6F3FF), Color(0xFFEBE6FF), Color(0xFFFFFFFF),
 
 class Plat {
   final String ar, en;
-  final RegExp re;
+  final List<String> hosts;
   final Color c;
   final IconData icon;
-  Plat(this.ar, this.en, this.re, this.c, this.icon);
+  const Plat(this.ar, this.en, this.hosts, this.c, this.icon);
 }
 
-final platforms = [
-  Plat('يوتيوب', 'YouTube', RegExp(r'youtu\.?be', caseSensitive: false),
-      const Color(0xFFFF3B3B), Icons.play_arrow_rounded),
-  Plat('إنستغرام', 'Instagram', RegExp(r'instagram\.com', caseSensitive: false),
-      const Color(0xFFD946EF), Icons.camera_alt_rounded),
-  Plat('تيك توك', 'TikTok', RegExp(r'tiktok\.com', caseSensitive: false),
-      const Color(0xFF06B6D4), Icons.music_note_rounded),
-  Plat('منصة X', 'X', RegExp(r'(twitter|x)\.com', caseSensitive: false),
-      const Color(0xFF6D4AFF), Icons.close_rounded),
-  Plat('فيسبوك', 'Facebook',
-      RegExp(r'(facebook|fb)\.com|fb\.watch', caseSensitive: false),
-      const Color(0xFF3B82F6), Icons.thumb_up_alt_rounded),
+const platforms = [
+  Plat('يوتيوب', 'YouTube', ['youtube.com', 'youtu.be'], Color(0xFFFF3B3B),
+      Icons.play_arrow_rounded),
+  Plat('إنستغرام', 'Instagram', ['instagram.com'], Color(0xFFD946EF),
+      Icons.camera_alt_rounded),
+  Plat('تيك توك', 'TikTok', ['tiktok.com'], Color(0xFF06B6D4),
+      Icons.music_note_rounded),
+  Plat('منصة X', 'X', ['x.com', 'twitter.com'], Color(0xFF6D4AFF),
+      Icons.close_rounded),
+  Plat('فيسبوك', 'Facebook', ['facebook.com', 'fb.com', 'fb.watch'],
+      Color(0xFF3B82F6), Icons.thumb_up_alt_rounded),
 ];
+
+/// Parses user text into an http(s) Uri (adds https:// when missing).
+Uri? parseLink(String text) {
+  final s = text.trim();
+  if (s.isEmpty || s.contains(RegExp(r'\s'))) return null;
+  final u = Uri.tryParse(s.contains('://') ? s : 'https://$s');
+  if (u == null || u.host.isEmpty) return null;
+  if (u.scheme != 'http' && u.scheme != 'https') return null;
+  return u;
+}
+
+/// Matches the link's real host (not just any text inside the URL).
+Plat? detectPlatform(Uri? u) {
+  if (u == null) return null;
+  final host = u.host.toLowerCase();
+  for (final p in platforms) {
+    for (final h in p.hosts) {
+      if (host == h || host.endsWith('.$h')) return p;
+    }
+  }
+  return null;
+}
 
 const qv = [
   ['360p', 'صغير', 'Small'],
@@ -99,6 +120,7 @@ class Item {
   bool downloading = true;
   String? filePath;
   String? error;
+  int? bytes;
   Item(this.p, this.audio, this.q);
 }
 
@@ -120,7 +142,9 @@ class DownloadService {
     required void Function(double progress) onProgress,
   }) async {
     final api = Uri.parse('$apiBaseUrl/api/download');
-    final client = HttpClient();
+    final client = HttpClient()
+      ..connectionTimeout = const Duration(seconds: 20);
+    File? target;
     try {
       final request = await client.postUrl(api);
       request.headers.contentType = ContentType.json;
@@ -149,6 +173,7 @@ class DownloadService {
       final downloads = Directory('${directory.path}/FlixGo/Downloads');
       await downloads.create(recursive: true);
       final file = File('${downloads.path}/$fileName');
+      target = file;
 
       final mediaRequest = await client.getUrl(Uri.parse(directUrl));
       final mediaResponse = await mediaRequest.close();
@@ -169,6 +194,10 @@ class DownloadService {
       }
       onProgress(100);
       return file.path;
+    } catch (_) {
+      final partial = target;
+      if (partial != null && partial.existsSync()) partial.deleteSync();
+      rethrow;
     } finally {
       client.close(force: true);
     }
@@ -215,17 +244,12 @@ class _HomeState extends State<Home> {
   Pal get c => dark ? darkPal : lightPal;
   String t(String k) => tr[ar ? 'ar' : 'en']![k]!;
   String pn(Plat p) => ar ? p.ar : p.en;
-  Plat? get plat {
-    for (final p in platforms) {
-      if (p.re.hasMatch(url.text)) return p;
-    }
-    return null;
-  }
+  Plat? get plat => detectPlatform(parseLink(url.text));
 
   String title(Item i) => '${t(i.audio ? 'aT' : 'vT')}${t('from')}${pn(i.p)}';
-  String size(Item i) => i.audio
-      ? '4.2${t('mb')}'
-      : '${{'360p': '18', '720p': '46', '1080p': '112', '4K': '380'}[i.q]}${t('mb')}';
+  String size(Item i) => i.bytes == null
+      ? '—'
+      : '${(i.bytes! / 1048576).toStringAsFixed(1)}${t('mb')}';
 
   @override
   void dispose() {
@@ -248,9 +272,13 @@ class _HomeState extends State<Home> {
 
   Future<void> paste() async {
     final d = await Clipboard.getData('text/plain');
-    final txt = d?.text ?? '';
-    url.text = txt.isNotEmpty ? txt : 'https://www.youtube.com/watch?v=demo123';
-    setState(() {});
+    if (!mounted) return;
+    final txt = (d?.text ?? '').trim();
+    if (txt.isEmpty) {
+      toast(t('need'));
+      return;
+    }
+    setState(() => url.text = txt);
   }
 
   Future<void> start() async {
@@ -264,7 +292,7 @@ class _HomeState extends State<Home> {
       return;
     }
 
-    final sourceUrl = url.text.trim();
+    final sourceUrl = parseLink(url.text)?.toString() ?? url.text.trim();
     final qq = audio ? qa[aq] : qv[vq];
     final it = Item(p, audio, audio ? '${qq[0]} kbps' : qq[0]);
     setState(() {
@@ -283,11 +311,13 @@ class _HomeState extends State<Home> {
           if (mounted) setState(() => it.pr = value.clamp(0, 100).toDouble());
         },
       );
+      final bytes = await File(path).length();
       if (!mounted) return;
       setState(() {
         it.pr = 100;
         it.downloading = false;
         it.filePath = path;
+        it.bytes = bytes;
       });
       toast('${t('done')}${title(it)}');
     } catch (e) {
@@ -566,7 +596,7 @@ class _HomeState extends State<Home> {
               ClipRRect(
                 borderRadius: BorderRadius.circular(9),
                 child: LinearProgressIndicator(
-                    value: i.pr / 100,
+                    value: done ? 1 : (i.pr > 0 ? i.pr / 100 : null),
                     minHeight: 7,
                     backgroundColor: c.bg2,
                     color: c.aqua),
