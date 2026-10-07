@@ -10,6 +10,9 @@ const PORT = Number(process.env.PORT || 8787);
 const PUBLIC_URL = process.env.PUBLIC_URL || ''; // e.g. https://api.example.com
 const YTDLP = process.env.YTDLP_BIN || 'yt-dlp';
 const DIR = process.env.FILES_DIR || path.join(os.tmpdir(), 'flixgo-files');
+const ALLOWED = (process.env.ALLOWED_HOSTS ||
+  'youtube.com,youtu.be,instagram.com,tiktok.com,x.com,twitter.com,facebook.com,fb.com,fb.watch')
+  .split(',').map((s) => s.trim().toLowerCase()).filter(Boolean);
 const MAX_JOBS = Number(process.env.MAX_JOBS || 3);
 const TTL_MS = 30 * 60 * 1000;
 const HEIGHTS = { '360p': 360, '720p': 720, '1080p': 1080, '4K': 2160 };
@@ -17,6 +20,11 @@ const TYPES = { mp4: 'video/mp4', mkv: 'video/x-matroska', webm: 'video/webm', m
 
 fs.mkdirSync(DIR, { recursive: true });
 let jobs = 0;
+
+function isAllowedHost(host) {
+  host = host.toLowerCase();
+  return ALLOWED.some((h) => host === h || host.endsWith('.' + h));
+}
 
 function send(res, status, obj) {
   const body = JSON.stringify(obj);
@@ -39,7 +47,9 @@ function readJson(req) {
 function runYtDlp(url, quality, audioOnly, id) {
   const args = ['--no-playlist', '--no-warnings', '--no-progress', '-o', path.join(DIR, `${id}.%(ext)s`)];
   if (audioOnly) {
-    args.push('-f', 'ba/b', '-x', '--audio-format', 'mp3');
+    const kbps = parseInt(quality, 10);
+    const abr = [128, 192, 320].includes(kbps) ? `${kbps}K` : '192K';
+    args.push('-f', 'ba/b', '-x', '--audio-format', 'mp3', '--audio-quality', abr);
   } else {
     const h = HEIGHTS[quality] || 720;
     args.push('-f', 'bv*+ba/b', '-S', `res:${h},vcodec:h264,acodec:m4a`, '--merge-output-format', 'mp4');
@@ -63,6 +73,7 @@ async function handleDownload(req, res) {
   let parsed;
   try { parsed = new URL(String(body.url || '')); } catch { return send(res, 400, { error: 'Invalid URL' }); }
   if (!['http:', 'https:'].includes(parsed.protocol)) return send(res, 400, { error: 'Only http/https links are allowed' });
+  if (!isAllowedHost(parsed.hostname)) return send(res, 400, { error: 'This website is not supported' });
   if (jobs >= MAX_JOBS) return send(res, 429, { error: 'Server is busy, try again shortly' });
 
   const id = crypto.randomBytes(8).toString('hex');
@@ -72,7 +83,7 @@ async function handleDownload(req, res) {
     const stored = path.basename(filepath);
     if (!stored.startsWith(id) || !fs.existsSync(path.join(DIR, stored))) throw new Error('Output file not found');
     const ext = path.extname(stored);
-    const base = (process.env.PUBLIC_URL || `http://${req.headers.host}`).replace(/\/$/, '');
+    const base = (PUBLIC_URL || `http://${req.headers.host}`).replace(/\/$/, '');
     const safeTitle = (title || 'flixgo').replace(/[\\/:*?"<>|\x00-\x1F]/g, '_').slice(0, 80);
     send(res, 200, { downloadUrl: `${base}/files/${stored}`, fileName: `${safeTitle}${ext}` });
   } catch (e) {
@@ -83,13 +94,18 @@ async function handleDownload(req, res) {
 }
 
 function handleFile(req, res) {
-  const name = decodeURIComponent(req.url.split('?')[0].slice('/files/'.length));
+  let name;
+  try { name = decodeURIComponent(req.url.split('?')[0].slice('/files/'.length)); }
+  catch { return send(res, 400, { error: 'Bad request' }); }
   if (!/^[a-f0-9]{16}\.[a-z0-9]{2,4}$/.test(name)) return send(res, 404, { error: 'Not found' });
   const file = path.join(DIR, name);
   fs.stat(file, (err, st) => {
     if (err) return send(res, 404, { error: 'Not found' });
     res.writeHead(200, { 'Content-Type': TYPES[name.split('.').pop()] || 'application/octet-stream', 'Content-Length': st.size });
-    fs.createReadStream(file).pipe(res);
+    const stream = fs.createReadStream(file);
+    stream.on('error', () => res.destroy());
+    res.on('close', () => stream.destroy());
+    stream.pipe(res);
   });
 }
 
