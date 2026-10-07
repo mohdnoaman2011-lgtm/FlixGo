@@ -7,3 +7,8 @@ build/
 *.swp
 .flutter-plugins
 .flutter-plugins-dependencies
+.gradle/
+android/local.properties
+android/.gradle/
+*.apk
+node_modules/
