@@ -18,7 +18,7 @@ import java.util.concurrent.TimeUnit
 
 class MainActivity : FlutterActivity() {
 
-        override fun onCreate(savedInstanceState: Bundle?) {
+    override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
             val lp = window.attributes
