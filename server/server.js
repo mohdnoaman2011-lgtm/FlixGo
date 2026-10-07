@@ -20,6 +20,7 @@ const TYPES = { mp4: 'video/mp4', mkv: 'video/x-matroska', webm: 'video/webm', m
 
 fs.mkdirSync(DIR, { recursive: true });
 let jobs = 0;
+let infoJobs = 0;
 
 function isAllowedHost(host) {
   host = host.toLowerCase();
@@ -27,6 +28,7 @@ function isAllowedHost(host) {
 }
 
 function send(res, status, obj) {
+  if (res.destroyed || res.headersSent) return;
   const body = JSON.stringify(obj);
   res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Content-Length': Buffer.byteLength(body) });
   res.end(body);
@@ -44,7 +46,21 @@ function readJson(req) {
   });
 }
 
-function runYtDlp(url, quality, audioOnly, id) {
+function lastLine(err, stderr) {
+  const last = String(stderr || err.message).trim().split('\n').filter(Boolean).pop() || 'yt-dlp failed';
+  return last.replace(/^ERROR:\s*/, '');
+}
+
+// Validates body.url; sends an error response and returns null when not allowed.
+function parseAllowedUrl(body, res) {
+  let parsed;
+  try { parsed = new URL(String(body.url || '')); } catch { send(res, 400, { error: 'Invalid URL' }); return null; }
+  if (!['http:', 'https:'].includes(parsed.protocol)) { send(res, 400, { error: 'Only http/https links are allowed' }); return null; }
+  if (!isAllowedHost(parsed.hostname)) { send(res, 400, { error: 'This website is not supported' }); return null; }
+  return parsed;
+}
+
+function runYtDlp(url, quality, audioOnly, id, ctl) {
   const args = ['--no-playlist', '--no-warnings', '--no-progress', '-o', path.join(DIR, `${id}.%(ext)s`)];
   if (audioOnly) {
     const kbps = parseInt(quality, 10);
@@ -56,36 +72,84 @@ function runYtDlp(url, quality, audioOnly, id) {
   }
   args.push('--print', 'after_move:filepath', '--print', 'after_move:title', '--', url);
   return new Promise((resolve, reject) => {
-    execFile(YTDLP, args, { timeout: 10 * 60 * 1000, maxBuffer: 5 * 1024 * 1024 }, (err, stdout, stderr) => {
-      if (err) {
-        const last = String(stderr || err.message).trim().split('\n').filter(Boolean).pop() || 'yt-dlp failed';
-        return reject(new Error(last.replace(/^ERROR:\s*/, '')));
-      }
+    ctl.child = execFile(YTDLP, args, { timeout: 10 * 60 * 1000, maxBuffer: 5 * 1024 * 1024 }, (err, stdout, stderr) => {
+      if (ctl.cancelled) return reject(new Error('Cancelled'));
+      if (err) return reject(new Error(lastLine(err, stderr)));
       const [filepath, ...rest] = stdout.trim().split('\n');
       resolve({ filepath: filepath.trim(), title: rest.join(' ').trim() });
     });
   });
 }
 
+function runInfo(url, ctl) {
+  const args = [
+    '--no-playlist', '--no-warnings', '--skip-download', '--ignore-no-formats-error',
+    '--print', '%(title)j', '--print', '%(thumbnail)j',
+    '--print', '%(duration)j', '--print', '%(uploader)j',
+    '--', url,
+  ];
+  return new Promise((resolve, reject) => {
+    ctl.child = execFile(YTDLP, args, { timeout: 40 * 1000, maxBuffer: 1024 * 1024 }, (err, stdout, stderr) => {
+      if (err) return reject(new Error(lastLine(err, stderr)));
+      const lines = stdout.trim().split('\n');
+      const pick = (i) => {
+        try { const v = JSON.parse(lines[i]); return v === null || v === undefined ? '' : v; } catch { return ''; }
+      };
+      resolve({
+        title: String(pick(0)).slice(0, 200),
+        thumbnail: String(pick(1)),
+        duration: Number(pick(2)) || 0,
+        uploader: String(pick(3)).slice(0, 80),
+      });
+    });
+  });
+}
+
+async function handleInfo(req, res) {
+  let body;
+  try { body = await readJson(req); } catch (e) { return send(res, 400, { error: e.message }); }
+  const parsed = parseAllowedUrl(body, res);
+  if (!parsed) return;
+  if (infoJobs >= 4) return send(res, 429, { error: 'Server is busy, try again shortly' });
+
+  const ctl = { child: null };
+  res.on('close', () => { if (!res.writableFinished && ctl.child) ctl.child.kill('SIGKILL'); });
+  infoJobs++;
+  try {
+    send(res, 200, await runInfo(parsed.href, ctl));
+  } catch (e) {
+    send(res, 502, { error: e.message });
+  } finally {
+    infoJobs--;
+  }
+}
+
 async function handleDownload(req, res) {
   let body;
   try { body = await readJson(req); } catch (e) { return send(res, 400, { error: e.message }); }
-  let parsed;
-  try { parsed = new URL(String(body.url || '')); } catch { return send(res, 400, { error: 'Invalid URL' }); }
-  if (!['http:', 'https:'].includes(parsed.protocol)) return send(res, 400, { error: 'Only http/https links are allowed' });
-  if (!isAllowedHost(parsed.hostname)) return send(res, 400, { error: 'This website is not supported' });
+  const parsed = parseAllowedUrl(body, res);
+  if (!parsed) return;
   if (jobs >= MAX_JOBS) return send(res, 429, { error: 'Server is busy, try again shortly' });
+
+  // If the app cancels (closes the connection), stop yt-dlp right away.
+  const ctl = { child: null, cancelled: false };
+  res.on('close', () => {
+    if (!res.writableFinished) {
+      ctl.cancelled = true;
+      if (ctl.child) ctl.child.kill('SIGKILL');
+    }
+  });
 
   const id = crypto.randomBytes(8).toString('hex');
   jobs++;
   try {
-    const { filepath, title } = await runYtDlp(parsed.href, String(body.quality || ''), body.audioOnly === true, id);
+    const { filepath, title } = await runYtDlp(parsed.href, String(body.quality || ''), body.audioOnly === true, id, ctl);
     const stored = path.basename(filepath);
     if (!stored.startsWith(id) || !fs.existsSync(path.join(DIR, stored))) throw new Error('Output file not found');
     const ext = path.extname(stored);
     const base = (PUBLIC_URL || `http://${req.headers.host}`).replace(/\/$/, '');
     const safeTitle = (title || 'flixgo').replace(/[\\/:*?"<>|\x00-\x1F]/g, '_').slice(0, 80);
-    send(res, 200, { downloadUrl: `${base}/files/${stored}`, fileName: `${safeTitle}${ext}` });
+    send(res, 200, { downloadUrl: `${base}/files/${stored}`, fileName: `${safeTitle}${ext}`, title: (title || '').slice(0, 200) });
   } catch (e) {
     send(res, 502, { error: e.message });
   } finally {
@@ -111,6 +175,7 @@ function handleFile(req, res) {
 
 const server = http.createServer((req, res) => {
   if (req.method === 'POST' && req.url === '/api/download') return handleDownload(req, res);
+  if (req.method === 'POST' && req.url === '/api/info') return handleInfo(req, res);
   if (req.method === 'GET' && req.url.startsWith('/files/')) return handleFile(req, res);
   if (req.method === 'GET' && req.url === '/health') return send(res, 200, { ok: true });
   send(res, 404, { error: 'Not found' });
