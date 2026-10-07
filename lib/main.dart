@@ -92,7 +92,8 @@ const tr = {
     'empty': 'لا توجد تحميلات بعد.\nالصق رابطاً وابدأ.',
     'l0': 'ملفاتك تظهر هنا.',
     'failed': 'فشل التحميل: ',
-    'saved': 'تم الحفظ في ملفات التطبيق',
+    'saved': 'تم الحفظ في المعرض ✓',
+    'saveFail': 'تم التحميل لكن تعذّر الحفظ في المعرض',
   },
   'en': {
     'h1': 'Download what you love\nin one tap',
@@ -108,7 +109,8 @@ const tr = {
     'empty': 'No downloads yet.\nPaste a link to start.',
     'l0': 'Your files show up here.',
     'failed': 'Download failed: ',
-    'saved': 'Saved in app files',
+    'saved': 'Saved to gallery ✓',
+    'saveFail': 'Downloaded, but saving to gallery failed',
   },
 };
 
@@ -134,6 +136,30 @@ class DownloadService {
     'FLIXGO_API_BASE_URL',
     defaultValue: 'http://10.0.2.2:8787',
   );
+
+  static const _media = MethodChannel('flixgo/media');
+
+  static String _mime(String path, bool audio) {
+    final ext = path.split('.').last.toLowerCase();
+    const types = {
+      'mp4': 'video/mp4',
+      'mkv': 'video/x-matroska',
+      'webm': 'video/webm',
+      'mp3': 'audio/mpeg',
+      'm4a': 'audio/mp4',
+    };
+    return types[ext] ?? (audio ? 'audio/mpeg' : 'video/mp4');
+  }
+
+  /// Copies the downloaded file into the phone gallery / music library.
+  static Future<void> saveToGallery(String path, bool audio) async {
+    await _media.invokeMethod<String>('saveToGallery', {
+      'path': path,
+      'name': path.split('/').last,
+      'mime': _mime(path, audio),
+      'audio': audio,
+    });
+  }
 
   static Future<String> download({
     required String sourceUrl,
@@ -306,12 +332,18 @@ class _HomeState extends State<Home> {
       final path = await DownloadService.download(
         sourceUrl: sourceUrl,
         quality: it.q,
-        audio: audio,
+        audio: it.audio,
         onProgress: (value) {
           if (mounted) setState(() => it.pr = value.clamp(0, 100).toDouble());
         },
       );
       final bytes = await File(path).length();
+      var saved = false;
+      try {
+        await DownloadService.saveToGallery(path, it.audio);
+        saved = true;
+        await File(path).delete();
+      } catch (_) {}
       if (!mounted) return;
       setState(() {
         it.pr = 100;
@@ -319,7 +351,7 @@ class _HomeState extends State<Home> {
         it.filePath = path;
         it.bytes = bytes;
       });
-      toast('${t('done')}${title(it)}');
+      toast(saved ? t('saved') : t('saveFail'));
     } catch (e) {
       if (!mounted) return;
       setState(() {
