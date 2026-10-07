@@ -7,7 +7,11 @@ import 'package:flutter/services.dart';
 import 'package:path_provider/path_provider.dart';
 import 'player.dart';
 
-void main() => runApp(const FlixGoApp());
+void main() {
+  WidgetsFlutterBinding.ensureInitialized();
+  SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
+  runApp(const FlixGoApp());
+}
 
 class Pal {
   final Color bg, bg2, card, ink, mute, line, pink, aqua, amber, vio;
@@ -21,6 +25,19 @@ const darkPal = Pal(Color(0xFF130E2B), Color(0xFF1D1542), Color(0xFF241B52),
 const lightPal = Pal(Color(0xFFF6F3FF), Color(0xFFEBE6FF), Color(0xFFFFFFFF),
     Color(0xFF1D1640), Color(0xFF6F6894), Color(0xFFDDD6F7), Color(0xFFFF4F84),
     Color(0xFF12B5A2), Color(0xFFF59E0B), Color(0xFF6D4AFF));
+
+/// Transparent system bars (full-screen look) with icons matching the theme.
+SystemUiOverlayStyle overlayFor(bool darkBg) => SystemUiOverlayStyle(
+      statusBarColor: Colors.transparent,
+      systemNavigationBarColor: Colors.transparent,
+      systemNavigationBarDividerColor: Colors.transparent,
+      systemNavigationBarContrastEnforced: false,
+      systemStatusBarContrastEnforced: false,
+      statusBarIconBrightness: darkBg ? Brightness.light : Brightness.dark,
+      statusBarBrightness: darkBg ? Brightness.dark : Brightness.light,
+      systemNavigationBarIconBrightness:
+          darkBg ? Brightness.light : Brightness.dark,
+    );
 
 class Plat {
   final String ar, en;
@@ -442,6 +459,12 @@ class FlixGoApp extends StatelessWidget {
         title: 'FlixGo',
         debugShowCheckedModeBanner: false,
         theme: ThemeData(fontFamily: 'Tajawal'),
+        // Keeps the layout intact even with a very large/small system font.
+        builder: (context, child) => MediaQuery.withClampedTextScaling(
+          minScaleFactor: 0.85,
+          maxScaleFactor: 1.15,
+          child: child ?? const SizedBox.shrink(),
+        ),
         home: const Home(),
       );
 }
@@ -472,6 +495,22 @@ class _HomeState extends State<Home> {
   String t(String k) => tr[ar ? 'ar' : 'en']![k]!;
   String pn(Plat p) => ar ? p.ar : p.en;
   List<Uri> get links => extractLinks(url.text);
+
+  // ---------- responsive helpers ----------
+  /// Width of the content column (phones: full width, big screens: 600).
+  double get contentW {
+    final w = MediaQuery.sizeOf(context).width;
+    return w > 600 ? 600.0 : w;
+  }
+
+  /// Scale factor for headline sizes (small phones shrink, big ones grow).
+  double get k => (contentW / 390).clamp(0.88, 1.15).toDouble();
+
+  /// Side padding that adapts to the screen width.
+  double get pad => contentW < 360 ? 14.0 : (contentW < 600 ? 18.0 : 24.0);
+
+  /// Height of the system gesture/navigation bar at the bottom.
+  double get bottomInset => MediaQuery.viewPaddingOf(context).bottom;
 
   String displayTitle(Item i) => i.title.isNotEmpty
       ? i.title
@@ -808,7 +847,7 @@ class _HomeState extends State<Home> {
       );
 
   Widget header() => Padding(
-        padding: const EdgeInsets.fromLTRB(18, 14, 18, 0),
+        padding: EdgeInsets.fromLTRB(pad, 14, pad, 0),
         child: Row(children: [
           Container(
             width: 38,
@@ -864,8 +903,10 @@ class _HomeState extends State<Home> {
               height: 16,
               child: CircularProgressIndicator(strokeWidth: 2, color: c.aqua)),
           const SizedBox(width: 10),
-          Text(t('loadingInfo'),
-              style: TextStyle(color: c.mute, fontSize: 13)),
+          Expanded(
+            child: Text(t('loadingInfo'),
+                style: TextStyle(color: c.mute, fontSize: 13)),
+          ),
         ]),
       );
     }
@@ -889,8 +930,8 @@ class _HomeState extends State<Home> {
         ClipRRect(
           borderRadius: BorderRadius.circular(12),
           child: SizedBox(
-            width: 96,
-            height: 60,
+            width: 96 * k,
+            height: 60 * k,
             child: thumbUrl.isEmpty
                 ? ph()
                 : Image.network(thumbUrl,
@@ -934,12 +975,12 @@ class _HomeState extends State<Home> {
             : (ar ? '${ls.length} روابط جاهزة' : '${ls.length} links ready');
     final dot = single?.c ?? (ls.isNotEmpty ? c.aqua : c.line);
     return ListView(
-      padding: const EdgeInsets.fromLTRB(18, 22, 18, 110),
+      padding: EdgeInsets.fromLTRB(pad, 22, pad, 110 + bottomInset),
       children: [
         Text(t('h1'),
             style: TextStyle(
                 color: c.ink,
-                fontSize: 28,
+                fontSize: 28 * k,
                 fontWeight: FontWeight.w800,
                 height: 1.25)),
         const SizedBox(height: 6),
@@ -992,14 +1033,17 @@ class _HomeState extends State<Home> {
                 decoration: BoxDecoration(shape: BoxShape.circle, color: dot),
               ),
               const SizedBox(width: 8),
-              Text(label, style: TextStyle(color: c.mute, fontSize: 13)),
+              Expanded(
+                child: Text(label,
+                    style: TextStyle(color: c.mute, fontSize: 13)),
+              ),
             ]),
           ]),
         ),
         previewCard(),
         const SizedBox(height: 18),
         Container(
-          height: 54,
+          height: 54 * k,
           padding: const EdgeInsets.all(5),
           decoration: BoxDecoration(
               color: c.bg2, borderRadius: BorderRadius.circular(18)),
@@ -1067,7 +1111,7 @@ class _HomeState extends State<Home> {
         GestureDetector(
           onTap: start,
           child: Container(
-            height: 58,
+            height: 58 * k,
             alignment: Alignment.center,
             decoration: BoxDecoration(
                 borderRadius: BorderRadius.circular(20),
@@ -1079,9 +1123,9 @@ class _HomeState extends State<Home> {
                       offset: const Offset(0, 10))
                 ]),
             child: Text(t('go'),
-                style: const TextStyle(
+                style: TextStyle(
                     color: Colors.white,
-                    fontSize: 17,
+                    fontSize: 17 * k,
                     fontWeight: FontWeight.w800)),
           ),
         ),
@@ -1237,7 +1281,8 @@ class _HomeState extends State<Home> {
                   style: TextStyle(color: c.mute, fontSize: 12)),
               const SizedBox(height: 8),
             ],
-            Row(children: acts(i)),
+            // Wrap: buttons drop to a second line on narrow phones.
+            Wrap(runSpacing: 6, children: acts(i)),
           ]),
         ),
         const SizedBox(width: 8),
@@ -1257,11 +1302,11 @@ class _HomeState extends State<Home> {
   Widget listPage() {
     final n = items.length;
     return ListView(
-      padding: const EdgeInsets.fromLTRB(18, 22, 18, 110),
+      padding: EdgeInsets.fromLTRB(pad, 22, pad, 110 + bottomInset),
       children: [
         Text(t('dl'),
             style: TextStyle(
-                color: c.ink, fontSize: 28, fontWeight: FontWeight.w800)),
+                color: c.ink, fontSize: 28 * k, fontWeight: FontWeight.w800)),
         const SizedBox(height: 6),
         Text(
             n == 0
@@ -1297,11 +1342,15 @@ class _HomeState extends State<Home> {
                 color: tab == i ? c.bg2 : Colors.transparent,
                 borderRadius: BorderRadius.circular(18)),
             child: Row(mainAxisAlignment: MainAxisAlignment.center, children: [
-              Text(label,
-                  style: TextStyle(
-                      color: tab == i ? c.vio : c.mute,
-                      fontWeight: FontWeight.w700,
-                      fontSize: 14)),
+              Flexible(
+                child: Text(label,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                        color: tab == i ? c.vio : c.mute,
+                        fontWeight: FontWeight.w700,
+                        fontSize: 14)),
+              ),
               if (badge > 0)
                 Container(
                   margin: const EdgeInsetsDirectional.only(start: 6),
@@ -1319,9 +1368,9 @@ class _HomeState extends State<Home> {
       );
 
   Widget nav() => Positioned(
-        left: 18,
-        right: 18,
-        bottom: 14,
+        left: pad,
+        right: pad,
+        bottom: 14 + bottomInset,
         child: Container(
           padding: const EdgeInsets.all(6),
           decoration: BoxDecoration(
@@ -1342,7 +1391,11 @@ class _HomeState extends State<Home> {
       );
 
   @override
-  Widget build(BuildContext context) => Directionality(
+  Widget build(BuildContext context) {
+    final keyboard = MediaQuery.viewInsetsOf(context).bottom > 0;
+    return AnnotatedRegion<SystemUiOverlayStyle>(
+      value: overlayFor(dark),
+      child: Directionality(
         textDirection: ar ? TextDirection.rtl : TextDirection.ltr,
         child: Scaffold(
           backgroundColor: c.bg,
@@ -1352,21 +1405,25 @@ class _HomeState extends State<Home> {
                     center: const Alignment(.7, -1.1),
                     radius: 1.3,
                     colors: [c.bg2, c.bg])),
+            // bottom: false -> the background reaches the very bottom edge.
             child: SafeArea(
+              bottom: false,
               child: Center(
                 child: ConstrainedBox(
-                  constraints: const BoxConstraints(maxWidth: 440),
+                  constraints: const BoxConstraints(maxWidth: 600),
                   child: Stack(children: [
                     Column(children: [
                       header(),
                       Expanded(child: tab == 0 ? downloadPage() : listPage()),
                     ]),
-                    nav(),
+                    if (!keyboard) nav(),
                   ]),
                 ),
               ),
             ),
           ),
         ),
-      );
+      ),
+    );
+  }
 }
