@@ -610,7 +610,7 @@ class _PlayerPageState extends State<PlayerPage> with WidgetsBindingObserver {
     );
   }
 
-     @override
+  @override
   Widget build(BuildContext context) {
     final darkBg = !isAudio || c.bg.computeLuminance() < 0.5;
     return AnnotatedRegion<SystemUiOverlayStyle>(
@@ -624,3 +624,4 @@ class _PlayerPageState extends State<PlayerPage> with WidgetsBindingObserver {
       ),
     );
   }
+}
