@@ -1,6 +1,5 @@
 // FlixGo — Flutter UI with real downloads.
-// Usage: flutter create flixgo, then replace lib/main.dart with this file.
-// Add path_provider to pubspec.yaml; see README.md.
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'package:flutter/material.dart';
@@ -43,7 +42,7 @@ const platforms = [
       Color(0xFF3B82F6), Icons.thumb_up_alt_rounded),
 ];
 
-/// Parses user text into an http(s) Uri (adds https:// when missing).
+/// Parses one piece of text into an http(s) Uri (adds https:// when missing).
 Uri? parseLink(String text) {
   final s = text.trim();
   if (s.isEmpty || s.contains(RegExp(r'\s'))) return null;
@@ -65,6 +64,25 @@ Plat? detectPlatform(Uri? u) {
   return null;
 }
 
+/// Finds every supported link inside a pasted text (separated by spaces/lines).
+List<Uri> extractLinks(String text) {
+  final out = <Uri>[];
+  for (final part in text.split(RegExp(r'\s+'))) {
+    final u = parseLink(part);
+    if (u == null || detectPlatform(u) == null) continue;
+    if (out.any((x) => x.toString() == u.toString())) continue;
+    out.add(u);
+  }
+  return out;
+}
+
+String fmtDur(int s) {
+  final h = s ~/ 3600;
+  final m = (s % 3600) ~/ 60;
+  final sec = (s % 60).toString().padLeft(2, '0');
+  return h > 0 ? '$h:${m.toString().padLeft(2, '0')}:$sec' : '$m:$sec';
+}
+
 const qv = [
   ['360p', 'صغير', 'Small'],
   ['720p', 'HD', 'HD'],
@@ -80,56 +98,134 @@ const qa = [
 const tr = {
   'ar': {
     'h1': 'حمّل ما يعجبك\nبضغطة واحدة',
-    'sub': 'الصق رابط الفيديو وسنجهّزه لك بالجودة التي تريدها.',
+    'sub': 'الصق رابطاً أو عدة روابط (كل رابط في سطر) وسنجهّزها لك.',
     'ph': 'الصق الرابط هنا', 'paste': 'لصق', 'video': '🎬 فيديو',
     'audio': '🎧 صوت فقط', 'go': 'ابدأ التحميل', 'dl': 'التحميلات',
     'newDl': 'تحميل جديد', 'none': 'لم يُكتشف رابط بعد',
     'found': 'تم اكتشاف: ', 'bad': 'الرابط غير مدعوم', 'ql': 'الجودة',
     'qa': 'جودة الصوت (MP3)', 'need': 'الصق رابطاً صالحاً أولاً',
-    'started': 'بدأ التحميل ✓', 'done': 'اكتمل: ', 'vT': 'فيديو',
+    'started': 'بدأ التحميل ✓', 'vT': 'فيديو',
     'aT': 'مقطع صوتي', 'from': ' من ', 'vK': 'فيديو', 'aK': 'صوت',
     'mb': ' ميغابايت', 'ok': 'تم ✓',
     'empty': 'لا توجد تحميلات بعد.\nالصق رابطاً وابدأ.',
     'l0': 'ملفاتك تظهر هنا.',
     'failed': 'فشل التحميل: ',
     'saved': 'تم الحفظ في المعرض ✓',
-    'saveFail': 'تم التحميل لكن تعذّر الحفظ في المعرض',
+    'saveFail': 'تعذّر الحفظ في المعرض',
+    'queued': 'في الانتظار',
+    'canceled': 'أُلغي التحميل',
+    'delQ': 'حذف الملف من الهاتف؟',
+    'yes': 'حذف',
+    'no': 'إلغاء',
+    'delFail': 'تعذّر حذف الملف',
+    'openFail': 'لا يوجد تطبيق لفتح الملف',
+    'loadingInfo': 'جارٍ جلب معلومات الفيديو…',
   },
   'en': {
     'h1': 'Download what you love\nin one tap',
-    'sub': "Paste a video link and we'll prepare it in the quality you want.",
+    'sub': 'Paste one link or several (one per line) and we will prepare them.',
     'ph': 'Paste the link here', 'paste': 'Paste', 'video': '🎬 Video',
     'audio': '🎧 Audio only', 'go': 'Start download', 'dl': 'Downloads',
     'newDl': 'New download', 'none': 'No link detected yet',
     'found': 'Detected: ', 'bad': 'Unsupported link', 'ql': 'Quality',
     'qa': 'Audio quality (MP3)', 'need': 'Paste a valid link first',
-    'started': 'Download started ✓', 'done': 'Finished: ', 'vT': 'Video',
+    'started': 'Download started ✓', 'vT': 'Video',
     'aT': 'Audio clip', 'from': ' from ', 'vK': 'Video', 'aK': 'Audio',
     'mb': ' MB', 'ok': 'Done ✓',
     'empty': 'No downloads yet.\nPaste a link to start.',
     'l0': 'Your files show up here.',
     'failed': 'Download failed: ',
     'saved': 'Saved to gallery ✓',
-    'saveFail': 'Downloaded, but saving to gallery failed',
+    'saveFail': 'Could not save to gallery',
+    'queued': 'Waiting in queue',
+    'canceled': 'Download canceled',
+    'delQ': 'Delete the file from your phone?',
+    'yes': 'Delete',
+    'no': 'Cancel',
+    'delFail': 'Could not delete the file',
+    'openFail': 'No app can open this file',
+    'loadingInfo': 'Fetching video info…',
   },
 };
 
+enum St { queued, running, done, failed, cancelled }
+
 class Item {
+  final int id;
   final Plat p;
   final bool audio;
   final String q;
+  final String sourceUrl;
+  St st = St.queued;
   double pr = 0;
-  bool downloading = true;
-  String? filePath;
+  String title = '';
+  String thumb = '';
+  String mime = '';
+  String? mediaUri;
   String? error;
   int? bytes;
-  Item(this.p, this.audio, this.q);
+  CancelToken? token;
+
+  Item({
+    required this.id,
+    required this.p,
+    required this.audio,
+    required this.q,
+    required this.sourceUrl,
+  });
+
+  Map<String, dynamic> toJson() => {
+        'id': id,
+        'pi': platforms.indexOf(p),
+        'audio': audio,
+        'q': q,
+        'src': sourceUrl,
+        'title': title,
+        'thumb': thumb,
+        'mime': mime,
+        'uri': mediaUri,
+        'bytes': bytes,
+      };
+
+  factory Item.fromJson(Map<String, dynamic> j) {
+    final it = Item(
+      id: (j['id'] as num).toInt(),
+      p: platforms[(j['pi'] as num).toInt()],
+      audio: j['audio'] == true,
+      q: j['q'] as String,
+      sourceUrl: j['src'] as String,
+    );
+    it.st = St.done;
+    it.pr = 100;
+    it.title = (j['title'] as String?) ?? '';
+    it.thumb = (j['thumb'] as String?) ?? '';
+    it.mime = (j['mime'] as String?) ?? '';
+    it.mediaUri = j['uri'] as String?;
+    it.bytes = (j['bytes'] as num?)?.toInt();
+    return it;
+  }
 }
 
-/// Connects the UI to a real download/resolver server.
-///
-/// The server receives a social-media URL and returns a direct media URL.
-/// Configure it with:
+class CancelToken {
+  bool cancelled = false;
+  HttpClient? _client;
+  void cancel() {
+    cancelled = true;
+    _client?.close(force: true);
+  }
+}
+
+class CancelledException implements Exception {
+  const CancelledException();
+}
+
+class DownloadResult {
+  final String path, name, title;
+  const DownloadResult(this.path, this.name, this.title);
+}
+
+/// Connects the UI to the download server.
+/// Configure with:
 /// flutter run --dart-define=FLIXGO_API_BASE_URL=https://your-api.example.com
 class DownloadService {
   static const apiBaseUrl = String.fromEnvironment(
@@ -139,8 +235,8 @@ class DownloadService {
 
   static const _media = MethodChannel('flixgo/media');
 
-  static String _mime(String path, bool audio) {
-    final ext = path.split('.').last.toLowerCase();
+  static String mimeOf(String name, bool audio) {
+    final ext = name.split('.').last.toLowerCase();
     const types = {
       'mp4': 'video/mp4',
       'mkv': 'video/x-matroska',
@@ -151,27 +247,71 @@ class DownloadService {
     return types[ext] ?? (audio ? 'audio/mpeg' : 'video/mp4');
   }
 
-  /// Copies the downloaded file into the phone gallery / music library.
-  static Future<void> saveToGallery(String path, bool audio) async {
-    await _media.invokeMethod<String>('saveToGallery', {
+  static Future<String?> saveToGallery(
+      String path, String name, bool audio) async {
+    return _media.invokeMethod<String>('saveToGallery', {
       'path': path,
-      'name': path.split('/').last,
-      'mime': _mime(path, audio),
+      'name': name,
+      'mime': mimeOf(name, audio),
       'audio': audio,
     });
   }
 
-  static Future<String> download({
+  static Future<bool> _call(String method, Map<String, dynamic> args) async {
+    try {
+      return (await _media.invokeMethod<bool>(method, args)) ?? false;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  static Future<bool> open(String uri, String mime) =>
+      _call('open', {'uri': uri, 'mime': mime});
+  static Future<bool> share(String uri, String mime) =>
+      _call('share', {'uri': uri, 'mime': mime});
+  static Future<bool> delete(String uri) => _call('delete', {'uri': uri});
+
+  /// Returns true when unsure, so history is never wiped by a failed check.
+  static Future<bool> exists(String uri) async {
+    try {
+      return (await _media.invokeMethod<bool>('exists', {'uri': uri})) ?? true;
+    } catch (_) {
+      return true;
+    }
+  }
+
+  static Future<Map<String, dynamic>> info(String sourceUrl) async {
+    final client = HttpClient()
+      ..connectionTimeout = const Duration(seconds: 15);
+    try {
+      final req = await client.postUrl(Uri.parse('$apiBaseUrl/api/info'));
+      req.headers.contentType = ContentType.json;
+      req.write(jsonEncode({'url': sourceUrl}));
+      final res = await req.close().timeout(const Duration(seconds: 45));
+      final body = await utf8.decoder.bind(res).join();
+      if (res.statusCode < 200 || res.statusCode >= 300) {
+        throw Exception(_serverMessage(body, res.statusCode));
+      }
+      return jsonDecode(body) as Map<String, dynamic>;
+    } finally {
+      client.close(force: true);
+    }
+  }
+
+  static Future<DownloadResult> download({
     required String sourceUrl,
     required String quality,
     required bool audio,
+    required CancelToken token,
     required void Function(double progress) onProgress,
   }) async {
     final api = Uri.parse('$apiBaseUrl/api/download');
     final client = HttpClient()
       ..connectionTimeout = const Duration(seconds: 20);
+    token._client = client;
     File? target;
     try {
+      if (token.cancelled) throw const CancelledException();
       final request = await client.postUrl(api);
       request.headers.contentType = ContentType.json;
       request.write(jsonEncode({
@@ -195,10 +335,15 @@ class DownloadService {
         (payload['fileName'] as String?) ??
             'flixgo_${DateTime.now().millisecondsSinceEpoch}.${audio ? 'mp3' : 'mp4'}',
       );
+      final title = (payload['title'] as String?) ?? '';
       final directory = await getApplicationDocumentsDirectory();
       final downloads = Directory('${directory.path}/FlixGo/Downloads');
       await downloads.create(recursive: true);
-      final file = File('${downloads.path}/$fileName');
+      final dot = fileName.lastIndexOf('.');
+      final ext = dot >= 0 ? fileName.substring(dot) : '';
+      // Unique temp name so two downloads with the same title never clash.
+      final file = File(
+          '${downloads.path}/${DateTime.now().microsecondsSinceEpoch}$ext');
       target = file;
 
       final mediaRequest = await client.getUrl(Uri.parse(directUrl));
@@ -211,6 +356,7 @@ class DownloadService {
       final sink = file.openWrite();
       try {
         await for (final chunk in mediaResponse) {
+          if (token.cancelled) throw const CancelledException();
           sink.add(chunk);
           received += chunk.length;
           if (total > 0) onProgress(received / total * 100);
@@ -219,10 +365,11 @@ class DownloadService {
         await sink.close();
       }
       onProgress(100);
-      return file.path;
+      return DownloadResult(file.path, fileName, title);
     } catch (_) {
       final partial = target;
       if (partial != null && partial.existsSync()) partial.deleteSync();
+      if (token.cancelled) throw const CancelledException();
       rethrow;
     } finally {
       client.close(force: true);
@@ -244,6 +391,42 @@ class DownloadService {
   }
 }
 
+/// Keeps finished downloads between app launches (a small JSON file).
+class HistoryStore {
+  static Future<File> _file() async {
+    final dir = await getApplicationDocumentsDirectory();
+    return File('${dir.path}/flixgo_history.json');
+  }
+
+  static Future<List<Item>> load() async {
+    try {
+      final f = await _file();
+      if (!await f.exists()) return [];
+      final data = jsonDecode(await f.readAsString());
+      final out = <Item>[];
+      for (final e in (data as List)) {
+        try {
+          out.add(Item.fromJson(e as Map<String, dynamic>));
+        } catch (_) {}
+      }
+      return out;
+    } catch (_) {
+      return [];
+    }
+  }
+
+  static Future<void> save(List<Item> items) async {
+    try {
+      final done = items
+          .where((i) => i.st == St.done && i.mediaUri != null)
+          .take(100)
+          .map((i) => i.toJson())
+          .toList();
+      await (await _file()).writeAsString(jsonEncode(done));
+    } catch (_) {}
+  }
+}
+
 class FlixGoApp extends StatelessWidget {
   const FlixGoApp({super.key});
   @override
@@ -262,23 +445,41 @@ class Home extends StatefulWidget {
 }
 
 class _HomeState extends State<Home> {
+  static const maxActive = 2;
+
   bool ar = true, dark = true, audio = false, err = false;
   int tab = 0, vq = 1, aq = 1;
   final url = TextEditingController();
   final items = <Item>[];
+  int _nextId = DateTime.now().millisecondsSinceEpoch;
+
+  // Link preview state
+  Timer? _debounce;
+  int _previewSeq = 0;
+  String? previewUrl;
+  Map<String, dynamic>? preview;
+  bool previewLoading = false;
 
   Pal get c => dark ? darkPal : lightPal;
   String t(String k) => tr[ar ? 'ar' : 'en']![k]!;
   String pn(Plat p) => ar ? p.ar : p.en;
-  Plat? get plat => detectPlatform(parseLink(url.text));
+  List<Uri> get links => extractLinks(url.text);
 
-  String title(Item i) => '${t(i.audio ? 'aT' : 'vT')}${t('from')}${pn(i.p)}';
-  String size(Item i) => i.bytes == null
-      ? '—'
-      : '${(i.bytes! / 1048576).toStringAsFixed(1)}${t('mb')}';
+  String displayTitle(Item i) => i.title.isNotEmpty
+      ? i.title
+      : '${t(i.audio ? 'aT' : 'vT')}${t('from')}${pn(i.p)}';
+  String size(Item i) =>
+      '${((i.bytes ?? 0) / 1048576).toStringAsFixed(1)}${t('mb')}';
+
+  @override
+  void initState() {
+    super.initState();
+    _loadHistory();
+  }
 
   @override
   void dispose() {
+    _debounce?.cancel();
     url.dispose();
     super.dispose();
   }
@@ -296,6 +497,68 @@ class _HomeState extends State<Home> {
     ));
   }
 
+  // ---------- history ----------
+  Future<void> _loadHistory() async {
+    final saved = await HistoryStore.load();
+    final alive = <Item>[];
+    for (final i in saved) {
+      final u = i.mediaUri;
+      if (u != null && await DownloadService.exists(u)) alive.add(i);
+    }
+    if (!mounted) return;
+    setState(() => items.addAll(alive));
+    if (alive.length != saved.length) _persist();
+  }
+
+  void _persist() {
+    HistoryStore.save(items);
+  }
+
+  // ---------- link preview ----------
+  void _onUrlChanged() {
+    final ls = links;
+    if (ls.length == 1 && ls.first.toString() == previewUrl) {
+      setState(() {});
+      return;
+    }
+    _debounce?.cancel();
+    final seq = ++_previewSeq;
+    if (ls.length != 1) {
+      setState(() {
+        preview = null;
+        previewLoading = false;
+        previewUrl = null;
+      });
+      return;
+    }
+    final u = ls.first.toString();
+    setState(() {
+      preview = null;
+      previewLoading = true;
+      previewUrl = u;
+    });
+    _debounce = Timer(const Duration(milliseconds: 700), () {
+      _loadPreview(u, seq);
+    });
+  }
+
+  Future<void> _loadPreview(String u, int seq) async {
+    try {
+      final info = await DownloadService.info(u);
+      if (!mounted || seq != _previewSeq) return;
+      setState(() {
+        preview = info;
+        previewLoading = false;
+      });
+    } catch (_) {
+      if (!mounted || seq != _previewSeq) return;
+      setState(() {
+        preview = null;
+        previewLoading = false;
+      });
+    }
+  }
+
   Future<void> paste() async {
     final d = await Clipboard.getData('text/plain');
     if (!mounted) return;
@@ -304,12 +567,14 @@ class _HomeState extends State<Home> {
       toast(t('need'));
       return;
     }
-    setState(() => url.text = txt);
+    url.text = txt;
+    _onUrlChanged();
   }
 
-  Future<void> start() async {
-    final p = plat;
-    if (p == null) {
+  // ---------- download queue ----------
+  void start() {
+    final ls = links;
+    if (ls.isEmpty) {
       setState(() => err = true);
       Future.delayed(const Duration(milliseconds: 700), () {
         if (mounted) setState(() => err = false);
@@ -318,50 +583,183 @@ class _HomeState extends State<Home> {
       return;
     }
 
-    final sourceUrl = parseLink(url.text)?.toString() ?? url.text.trim();
     final qq = audio ? qa[aq] : qv[vq];
-    final it = Item(p, audio, audio ? '${qq[0]} kbps' : qq[0]);
+    final q = audio ? '${qq[0]} kbps' : qq[0];
+    final pv = ls.length == 1 ? preview : null;
+    final created = <Item>[];
+    for (final u in ls) {
+      final it = Item(
+        id: _nextId++,
+        p: detectPlatform(u)!,
+        audio: audio,
+        q: q,
+        sourceUrl: u.toString(),
+      );
+      if (pv != null) {
+        it.title = (pv['title'] ?? '').toString();
+        it.thumb = (pv['thumbnail'] ?? '').toString();
+      }
+      created.add(it);
+    }
+
+    _debounce?.cancel();
+    _previewSeq++;
     setState(() {
-      items.insert(0, it);
+      items.insertAll(0, created);
       url.clear();
+      preview = null;
+      previewLoading = false;
+      previewUrl = null;
       tab = 1;
     });
     toast(t('started'));
+    _pump();
+  }
 
+  void _pump() {
+    if (!mounted) return;
+    var running = items.where((i) => i.st == St.running).length;
+    final queued = items.where((i) => i.st == St.queued).toList()
+      ..sort((a, b) => a.id.compareTo(b.id));
+    for (final it in queued) {
+      if (running >= maxActive) break;
+      running++;
+      _run(it);
+    }
+  }
+
+  Future<void> _run(Item it) async {
+    final token = CancelToken();
+    setState(() {
+      it.st = St.running;
+      it.pr = 0;
+      it.error = null;
+      it.token = token;
+    });
     try {
-      final path = await DownloadService.download(
-        sourceUrl: sourceUrl,
+      final r = await DownloadService.download(
+        sourceUrl: it.sourceUrl,
         quality: it.q,
         audio: it.audio,
+        token: token,
         onProgress: (value) {
           if (mounted) setState(() => it.pr = value.clamp(0, 100).toDouble());
         },
       );
-      final bytes = await File(path).length();
-      var saved = false;
+      final bytes = await File(r.path).length();
+      String? uri;
       try {
-        await DownloadService.saveToGallery(path, it.audio);
-        saved = true;
-        await File(path).delete();
+        uri = await DownloadService.saveToGallery(r.path, r.name, it.audio);
       } catch (_) {}
+      try {
+        await File(r.path).delete();
+      } catch (_) {}
+      if (uri == null) throw Exception(t('saveFail'));
       if (!mounted) return;
       setState(() {
+        it.st = St.done;
         it.pr = 100;
-        it.downloading = false;
-        it.filePath = path;
         it.bytes = bytes;
+        it.mediaUri = uri;
+        it.mime = DownloadService.mimeOf(r.name, it.audio);
+        if (it.title.isEmpty && r.title.isNotEmpty) it.title = r.title;
+        it.token = null;
       });
-      toast(saved ? t('saved') : t('saveFail'));
+      _persist();
+      toast(t('saved'));
+    } on CancelledException {
+      if (!mounted) return;
+      setState(() {
+        it.st = St.cancelled;
+        it.token = null;
+      });
     } catch (e) {
       if (!mounted) return;
       setState(() {
-        it.downloading = false;
+        it.st = St.failed;
         it.error = e.toString().replaceFirst('Exception: ', '');
+        it.token = null;
       });
       toast('${t('failed')}${it.error}');
+    } finally {
+      _pump();
     }
   }
 
+  void cancel(Item i) {
+    if (i.st == St.running) {
+      i.token?.cancel();
+    } else if (i.st == St.queued) {
+      setState(() => i.st = St.cancelled);
+    }
+  }
+
+  void retry(Item i) {
+    setState(() {
+      i.st = St.queued;
+      i.error = null;
+      i.pr = 0;
+    });
+    _pump();
+  }
+
+  void removeItem(Item i) {
+    setState(() => items.remove(i));
+    _persist();
+  }
+
+  String _mimeOf(Item i) =>
+      i.mime.isNotEmpty ? i.mime : (i.audio ? 'audio/mpeg' : 'video/mp4');
+
+  Future<void> openItem(Item i) async {
+    final u = i.mediaUri;
+    if (u == null) return;
+    final ok = await DownloadService.open(u, _mimeOf(i));
+    if (!ok && mounted) toast(t('openFail'));
+  }
+
+  Future<void> shareItem(Item i) async {
+    final u = i.mediaUri;
+    if (u == null) return;
+    final ok = await DownloadService.share(u, _mimeOf(i));
+    if (!ok && mounted) toast(t('openFail'));
+  }
+
+  Future<void> deleteItem(Item i) async {
+    final yes = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => Directionality(
+        textDirection: ar ? TextDirection.rtl : TextDirection.ltr,
+        child: AlertDialog(
+          backgroundColor: c.card,
+          title: Text(t('delQ'),
+              style: TextStyle(
+                  color: c.ink, fontSize: 16, fontWeight: FontWeight.w700)),
+          actions: [
+            TextButton(
+                onPressed: () => Navigator.pop(ctx, false),
+                child: Text(t('no'), style: TextStyle(color: c.mute))),
+            TextButton(
+                onPressed: () => Navigator.pop(ctx, true),
+                child: Text(t('yes'), style: TextStyle(color: c.pink))),
+          ],
+        ),
+      ),
+    );
+    if (yes != true || !mounted) return;
+    final u = i.mediaUri;
+    if (u != null) {
+      final deleted = await DownloadService.delete(u);
+      if (!deleted && await DownloadService.exists(u)) {
+        if (mounted) toast(t('delFail'));
+        return;
+      }
+    }
+    if (!mounted) return;
+    removeItem(i);
+  }
+
+  // ---------- widgets ----------
   Widget sq(Widget ch, VoidCallback f) => GestureDetector(
         onTap: f,
         child: Container(
@@ -423,10 +821,85 @@ class _HomeState extends State<Home> {
         ),
       );
 
+  Widget previewCard() {
+    if (previewLoading) {
+      return Padding(
+        padding: const EdgeInsets.only(top: 12),
+        child: Row(children: [
+          SizedBox(
+              width: 16,
+              height: 16,
+              child: CircularProgressIndicator(strokeWidth: 2, color: c.aqua)),
+          const SizedBox(width: 10),
+          Text(t('loadingInfo'),
+              style: TextStyle(color: c.mute, fontSize: 13)),
+        ]),
+      );
+    }
+    final pv = preview;
+    if (pv == null) return const SizedBox.shrink();
+    final title = (pv['title'] ?? '').toString();
+    final thumbUrl = (pv['thumbnail'] ?? '').toString();
+    final by = (pv['uploader'] ?? '').toString();
+    final dur = (pv['duration'] as num?)?.toInt() ?? 0;
+    final meta = [by, if (dur > 0) fmtDur(dur)].where((s) => s.isNotEmpty);
+    Widget ph() => Container(
+        color: c.bg2, child: Icon(Icons.movie_rounded, color: c.mute));
+    return Container(
+      margin: const EdgeInsets.only(top: 12),
+      padding: const EdgeInsets.all(10),
+      decoration: BoxDecoration(
+          color: c.card,
+          borderRadius: BorderRadius.circular(18),
+          border: Border.all(color: c.line, width: 1.5)),
+      child: Row(children: [
+        ClipRRect(
+          borderRadius: BorderRadius.circular(12),
+          child: SizedBox(
+            width: 96,
+            height: 60,
+            child: thumbUrl.isEmpty
+                ? ph()
+                : Image.network(thumbUrl,
+                    fit: BoxFit.cover,
+                    errorBuilder: (ctx, e, st) => ph()),
+          ),
+        ),
+        const SizedBox(width: 10),
+        Expanded(
+          child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(title.isEmpty ? '—' : title,
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                        color: c.ink,
+                        fontSize: 13.5,
+                        fontWeight: FontWeight.w700)),
+                const SizedBox(height: 4),
+                Text(meta.join(' · '),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(color: c.mute, fontSize: 12)),
+              ]),
+        ),
+      ]),
+    );
+  }
+
   Widget downloadPage() {
-    final p = plat;
+    final ls = links;
     final qs = audio ? qa : qv;
     final sel = audio ? aq : vq;
+    final single = ls.length == 1 ? detectPlatform(ls.first) : null;
+    final label = ls.isEmpty
+        ? (url.text.trim().isEmpty ? t('none') : t('bad'))
+        : ls.length == 1
+            ? '${t('found')}${pn(single!)}'
+            : (ar ? '${ls.length} روابط جاهزة' : '${ls.length} links ready');
+    final dot = single?.c ?? (ls.isNotEmpty ? c.aqua : c.line);
     return ListView(
       padding: const EdgeInsets.fromLTRB(18, 22, 18, 110),
       children: [
@@ -451,8 +924,10 @@ class _HomeState extends State<Home> {
               Expanded(
                 child: TextField(
                   controller: url,
-                  onChanged: (_) => setState(() {}),
-                  keyboardType: TextInputType.url,
+                  onChanged: (_) => _onUrlChanged(),
+                  keyboardType: TextInputType.multiline,
+                  minLines: 1,
+                  maxLines: 4,
                   textDirection: url.text.isEmpty ? null : TextDirection.ltr,
                   style: TextStyle(color: c.ink, fontSize: 15),
                   decoration: InputDecoration(
@@ -481,20 +956,14 @@ class _HomeState extends State<Home> {
                 duration: const Duration(milliseconds: 250),
                 width: 10,
                 height: 10,
-                decoration:
-                    BoxDecoration(shape: BoxShape.circle, color: p?.c ?? c.line),
+                decoration: BoxDecoration(shape: BoxShape.circle, color: dot),
               ),
               const SizedBox(width: 8),
-              Text(
-                  p != null
-                      ? '${t('found')}${pn(p)}'
-                      : url.text.isEmpty
-                          ? t('none')
-                          : t('bad'),
-                  style: TextStyle(color: c.mute, fontSize: 13)),
+              Text(label, style: TextStyle(color: c.mute, fontSize: 13)),
             ]),
           ]),
         ),
+        previewCard(),
         const SizedBox(height: 18),
         Container(
           height: 54,
@@ -587,9 +1056,84 @@ class _HomeState extends State<Home> {
     );
   }
 
+  Widget iconBox(Item i) => Container(
+        width: 54,
+        height: 54,
+        decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(16),
+            gradient: LinearGradient(colors: [i.p.c, c.vio])),
+        child: Icon(i.audio ? Icons.music_note_rounded : i.p.icon,
+            color: Colors.white),
+      );
+
+  Widget thumbBox(Item i) {
+    if (i.thumb.isEmpty) return iconBox(i);
+    return ClipRRect(
+      borderRadius: BorderRadius.circular(16),
+      child: SizedBox(
+        width: 54,
+        height: 54,
+        child: Image.network(i.thumb,
+            fit: BoxFit.cover, errorBuilder: (ctx, e, st) => iconBox(i)),
+      ),
+    );
+  }
+
+  Widget act(IconData icon, VoidCallback f, {Color? color}) => GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        onTap: f,
+        child: Container(
+          width: 36,
+          height: 30,
+          margin: const EdgeInsetsDirectional.only(end: 8),
+          alignment: Alignment.center,
+          decoration: BoxDecoration(
+              color: c.bg2, borderRadius: BorderRadius.circular(10)),
+          child: Icon(icon, size: 18, color: color ?? c.ink),
+        ),
+      );
+
+  List<Widget> acts(Item i) {
+    if (i.st == St.done) {
+      return [
+        act(Icons.play_circle_outline_rounded, () => openItem(i)),
+        act(Icons.share_rounded, () => shareItem(i)),
+        act(Icons.delete_outline_rounded, () => deleteItem(i), color: c.pink),
+      ];
+    }
+    if (i.st == St.failed || i.st == St.cancelled) {
+      return [
+        act(Icons.refresh_rounded, () => retry(i)),
+        act(Icons.delete_outline_rounded, () => removeItem(i), color: c.pink),
+      ];
+    }
+    return [act(Icons.close_rounded, () => cancel(i), color: c.pink)];
+  }
+
   Widget card(Item i) {
-    final done = i.filePath != null;
-    final failed = i.error != null;
+    final failed = i.st == St.failed;
+    final running = i.st == St.running;
+    final queued = i.st == St.queued;
+    final done = i.st == St.done;
+    final canceled = i.st == St.cancelled;
+    final mid = <String>[
+      pn(i.p),
+      t(i.audio ? 'aK' : 'vK'),
+      i.q,
+      if (i.bytes != null) size(i),
+    ];
+    String status;
+    if (failed) {
+      status = '!';
+    } else if (done) {
+      status = t('ok');
+    } else if (running) {
+      status = '${i.pr.floor()}%';
+    } else if (queued) {
+      status = '…';
+    } else {
+      status = '—';
+    }
     return Container(
       margin: const EdgeInsets.only(top: 12),
       padding: const EdgeInsets.all(12),
@@ -597,48 +1141,54 @@ class _HomeState extends State<Home> {
           color: c.card,
           borderRadius: BorderRadius.circular(20),
           border: Border.all(color: failed ? c.pink : c.line, width: 1.5)),
-      child: Row(children: [
-        Container(
-          width: 54,
-          height: 54,
-          decoration: BoxDecoration(
-              borderRadius: BorderRadius.circular(16),
-              gradient: LinearGradient(colors: [i.p.c, c.vio])),
-          child: Icon(i.audio ? Icons.music_note_rounded : i.p.icon,
-              color: Colors.white),
-        ),
+      child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        thumbBox(i),
         const SizedBox(width: 12),
         Expanded(
           child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-            Text(title(i),
+            Text(displayTitle(i),
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
                 style: TextStyle(
                     color: c.ink, fontSize: 15, fontWeight: FontWeight.w700)),
             const SizedBox(height: 2),
-            Text('${t(i.audio ? 'aK' : 'vK')} · ${i.q} · ${size(i)}',
+            Text(mid.join(' · '),
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
                 style: TextStyle(color: c.mute, fontSize: 12.5)),
             const SizedBox(height: 8),
-            if (failed)
-              Text(i.error!,
+            if (failed) ...[
+              Text(i.error ?? '',
                   maxLines: 2,
                   overflow: TextOverflow.ellipsis,
-                  style: TextStyle(color: c.pink, fontSize: 11.5))
-            else
+                  style: TextStyle(color: c.pink, fontSize: 11.5)),
+              const SizedBox(height: 8),
+            ] else if (running) ...[
               ClipRRect(
                 borderRadius: BorderRadius.circular(9),
                 child: LinearProgressIndicator(
-                    value: done ? 1 : (i.pr > 0 ? i.pr / 100 : null),
+                    value: i.pr > 0 ? i.pr / 100 : null,
                     minHeight: 7,
                     backgroundColor: c.bg2,
                     color: c.aqua),
               ),
+              const SizedBox(height: 8),
+            ] else if (queued) ...[
+              Text(t('queued'),
+                  style: TextStyle(color: c.mute, fontSize: 12)),
+              const SizedBox(height: 8),
+            ] else if (canceled) ...[
+              Text(t('canceled'),
+                  style: TextStyle(color: c.mute, fontSize: 12)),
+              const SizedBox(height: 8),
+            ],
+            Row(children: acts(i)),
           ]),
         ),
-        const SizedBox(width: 12),
+        const SizedBox(width: 8),
         SizedBox(
           width: 40,
-          child: Text(failed ? '!' : done ? t('ok') : '${i.pr.floor()}%',
+          child: Text(status,
               textAlign: TextAlign.center,
               style: TextStyle(
                   color: failed ? c.pink : done ? c.aqua : c.ink,
@@ -662,8 +1212,8 @@ class _HomeState extends State<Home> {
             n == 0
                 ? t('l0')
                 : ar
-                    ? '$n ملف في هذه الجلسة'
-                    : '$n file${n == 1 ? '' : 's'} this session',
+                    ? '$n ملف'
+                    : '$n file${n == 1 ? '' : 's'}',
             style: TextStyle(color: c.mute, fontSize: 14)),
         if (n == 0)
           Padding(
