@@ -1,5 +1,5 @@
 name: flixgo
-description: A professional task manager built with Flutter.
+description: A social media video and audio downloader built with Flutter.
 publish_to: 'none'
 version: 1.0.0+1
 
@@ -9,8 +9,7 @@ environment:
 dependencies:
   flutter:
     sdk: flutter
-    path_provider: ^2.1.5
-  shared_preferences: ^2.2.2
+  path_provider: ^2.1.5
 
 flutter:
   uses-material-design: true
