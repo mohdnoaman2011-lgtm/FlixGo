@@ -5,6 +5,7 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:path_provider/path_provider.dart';
+import 'player.dart';
 
 void main() => runApp(const FlixGoApp());
 
@@ -270,6 +271,13 @@ class DownloadService {
   static Future<bool> share(String uri, String mime) =>
       _call('share', {'uri': uri, 'mime': mime});
   static Future<bool> delete(String uri) => _call('delete', {'uri': uri});
+
+  /// Keeps the screen awake while the in-app player is open.
+  static Future<void> keepScreenOn(bool on) async {
+    try {
+      await _media.invokeMethod<bool>('keepScreenOn', {'on': on});
+    } catch (_) {}
+  }
 
   /// Returns true when unsure, so history is never wiped by a failed check.
   static Future<bool> exists(String uri) async {
@@ -711,7 +719,32 @@ class _HomeState extends State<Home> {
   String _mimeOf(Item i) =>
       i.mime.isNotEmpty ? i.mime : (i.audio ? 'audio/mpeg' : 'video/mp4');
 
-  Future<void> openItem(Item i) async {
+  /// Opens the built-in player on the tapped file (playlist = same kind).
+  void playItem(Item i) {
+    final same = items
+        .where((x) =>
+            x.st == St.done && x.mediaUri != null && x.audio == i.audio)
+        .toList();
+    final idx = same.indexOf(i);
+    if (idx < 0) return;
+    final tracks = [
+      for (final x in same)
+        Track(
+          title: displayTitle(x),
+          subtitle: '${pn(x.p)} · ${x.q}',
+          uri: x.mediaUri!,
+          mime: _mimeOf(x),
+          thumb: x.thumb,
+          audio: x.audio,
+        ),
+    ];
+    Navigator.of(context).push(MaterialPageRoute<void>(
+      builder: (_) =>
+          PlayerPage(tracks: tracks, start: idx, pal: c, ar: ar),
+    ));
+  }
+
+  Future<void> openExternal(Item i) async {
     final u = i.mediaUri;
     if (u == null) return;
     final ok = await DownloadService.open(u, _mimeOf(i));
@@ -1066,7 +1099,7 @@ class _HomeState extends State<Home> {
             color: Colors.white),
       );
 
-  Widget thumbBox(Item i) {
+  Widget thumbRaw(Item i) {
     if (i.thumb.isEmpty) return iconBox(i);
     return ClipRRect(
       borderRadius: BorderRadius.circular(16),
@@ -1076,6 +1109,26 @@ class _HomeState extends State<Home> {
         child: Image.network(i.thumb,
             fit: BoxFit.cover, errorBuilder: (ctx, e, st) => iconBox(i)),
       ),
+    );
+  }
+
+  /// Thumbnail; for finished files it shows a play badge and opens the player.
+  Widget thumbBox(Item i) {
+    final base = thumbRaw(i);
+    if (i.st != St.done) return base;
+    return GestureDetector(
+      onTap: () => playItem(i),
+      child: Stack(alignment: Alignment.center, children: [
+        base,
+        Container(
+          width: 26,
+          height: 26,
+          decoration: const BoxDecoration(
+              color: Colors.black54, shape: BoxShape.circle),
+          child: const Icon(Icons.play_arrow_rounded,
+              color: Colors.white, size: 18),
+        ),
+      ]),
     );
   }
 
@@ -1096,8 +1149,10 @@ class _HomeState extends State<Home> {
   List<Widget> acts(Item i) {
     if (i.st == St.done) {
       return [
-        act(Icons.play_circle_outline_rounded, () => openItem(i)),
+        act(Icons.play_circle_outline_rounded, () => playItem(i),
+            color: c.aqua),
         act(Icons.share_rounded, () => shareItem(i)),
+        act(Icons.open_in_new_rounded, () => openExternal(i)),
         act(Icons.delete_outline_rounded, () => deleteItem(i), color: c.pink),
       ];
     }
