@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       api_url:
-        description: 'Server URL (https://...)'
+        description: 'Server URL (http://127.0.0.1:8787)'
         required: true
       flutter_version:
         description: 'Flutter version'
