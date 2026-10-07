@@ -610,12 +610,17 @@ class _PlayerPageState extends State<PlayerPage> with WidgetsBindingObserver {
     );
   }
 
-  @override
-  Widget build(BuildContext context) => Directionality(
+   @override
+  Widget build(BuildContext context) {
+    final darkBg = !isAudio || c.bg.computeLuminance() < 0.5;
+    return AnnotatedRegion<SystemUiOverlayStyle>(
+      value: overlayFor(darkBg),
+      child: Directionality(
         textDirection: TextDirection.ltr,
         child: Scaffold(
           backgroundColor: isAudio ? c.bg : Colors.black,
           body: isAudio ? _audioBody() : _videoBody(),
         ),
-      );
-}
+      ),
+    );
+  }
